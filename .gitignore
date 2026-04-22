@@ -1,0 +1,38 @@
+# ---- Build artifacts ----
+build/
+x64/
+Debug/
+Release/
+*.obj
+*.exe
+*.dll
+*.lib
+*.pdb
+*.ilk
+*.exp
+*.idb
+
+# ---- Third-party binaries (large, fetched locally) ----
+OpenCV/
+
+# ---- IDE / OS ----
+.vs/
+.vscode/
+*.user
+*.suo
+Thumbs.db
+.DS_Store
+
+# ---- CMake ----
+CMakeCache.txt
+CMakeFiles/
+CMakeScripts/
+cmake_install.cmake
+CTestTestfile.cmake
+compile_commands.json
+
+# ---- Output images produced by the program ----
+*_corners.bmp
+*_corners.png
+*_corners.jpg
+*_corners.jpeg
