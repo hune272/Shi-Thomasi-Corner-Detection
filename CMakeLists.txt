@@ -13,7 +13,7 @@ link_directories(${OPENCV_LIB_DIR})
 add_executable(${PROJECT_NAME}
     stdafx.cpp
     common.cpp
-    OpenCVApplication.cpp
+    ShiTomasi.cpp
 )
 
 target_compile_definitions(${PROJECT_NAME} PRIVATE

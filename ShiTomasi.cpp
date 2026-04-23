@@ -35,6 +35,24 @@
 #endif
 
 // -----------------------------------------------------------------------------
+// Acces la un pixel dintr-un Mat cu strategia "clamp-to-edge":
+// daca (y, x) este in afara imaginii, se intoarce valoarea celui mai apropiat
+// pixel valid de pe margine (nu se adauga zero). Pastreaza intensitatea medie
+// in apropierea marginilor si evita artefactele de tip "halo intunecat".
+//
+// Sablonizat dupa tipul de pixel:
+//   - atClamp<float>(M, y, x)    pentru Mat-uri CV_32F (1 canal)
+//   - atClamp<Point3f>(M, y, x)  pentru Mat-uri CV_32FC3 (3 canale, ex. Ixx/Ixy/Iyy)
+// -----------------------------------------------------------------------------
+template<typename T>
+T atClamp(const Mat& img, int y, int x)
+{
+    if (y < 0) y = 0; else if (y >= img.rows) y = img.rows - 1;
+    if (x < 0) x = 0; else if (x >= img.cols) x = img.cols - 1;
+    return img.at<T>(y, x);
+}
+
+// -----------------------------------------------------------------------------
 // testShiTomasi()
 //
 // Full Shi-Tomasi pipeline:
@@ -51,25 +69,27 @@
 // -----------------------------------------------------------------------------
 void testShiTomasi()
 {
-    // --- Tunable parameters -------------------------------------------------
-    const int   MAX_CORNERS   = 500;    // upper bound on reported corners
-    const float QUALITY_LEVEL = 0.01f;  // fraction of max response used as threshold
-    const int   MIN_DISTANCE  = 10;     // radius of the NMS window (pixels)
-
     char fname[MAX_PATH];
     while (openFileDlg(fname))
     {
+        // -----------------------------------------------------------------
+        // Citirea imaginii sursa (color BGR, uchar).
+        // -----------------------------------------------------------------
         Mat src = imread(fname);
         if (src.empty()) continue;
 
         const int H = src.rows;
         const int W = src.cols;
 
-        // =====================================================================
-        // Step 1. Manual grayscale conversion (BGR -> Y), stored as CV_32F.
-        //         Y(x,y) = 0.299*R + 0.587*G + 0.114*B
-        //         (OpenCV stores color images in BGR order.)
-        // =====================================================================
+        // =================================================================
+        // Pasul 1. Conversie manuala BGR -> grayscale.
+        //
+        //     Y(x, y) = 0.299 * R + 0.587 * G + 0.114 * B
+        //
+        // Stocam rezultatul intr-un Mat CV_32F pentru ca urmatorii pasi
+        // (blur, gradient, structure matrix) lucreaza cu numere reale.
+        // OpenCV stocheaza pixelii color in ordinea B, G, R.
+        // =================================================================
         Mat gray(H, W, CV_32F);
         for (int y = 0; y < H; ++y)
         {
@@ -84,38 +104,49 @@ void testShiTomasi()
             }
         }
 
-        // Helper: clamp-to-edge index access for a CV_32F Mat.
-        auto atClamp = [](const Mat& M, int y, int x) -> float {
-            if (y < 0) y = 0; else if (y >= M.rows) y = M.rows - 1;
-            if (x < 0) x = 0; else if (x >= M.cols) x = M.cols - 1;
-            return M.at<float>(y, x);
-        };
-
-        // =====================================================================
-        // Step 2. Gaussian blur with a 5x5 kernel, sigma = 1.0.
-        //         G(i,j) = (1 / (2*pi*sigma^2)) * exp(-(i^2 + j^2) / (2*sigma^2))
-        //         Kernel is normalised so that the sum of weights is 1.
-        // =====================================================================
-        const int   GK = 5;                  // kernel size
-        const int   GR = GK / 2;             // kernel radius (= 2)
+        // =================================================================
+        // Pasul 2. Gaussian blur 5x5, sigma = 1.0.
+        //
+        //   1) Construim nucleul (kernel) gaussian 5x5 dupa formula:
+        //
+        //        G(i, j) = (1 / (2*pi*sigma^2)) * exp(-(i^2 + j^2) / (2*sigma^2))
+        //
+        //      apoi normalizam astfel incat suma tuturor coeficientilor sa
+        //      fie 1 (pastreaza intensitatea medie a imaginii).
+        //
+        //   2) Aplicam convolutie 2D pe imaginea grayscale. Pentru pixelii
+        //      de pe margine, indicii care ar iesi din imagine sunt "prinsi"
+        //      la cel mai apropiat pixel valid (clamp-to-edge) -- fara
+        //      copyMakeBorder.
+        // =================================================================
+        const int   GK = 5;        // dimensiunea kernelului
+        const int   GR = GK / 2;   // raza kernelului (= 2)
         const float sigma = 1.0f;
+
         float gKernel[GK][GK];
         {
             float sum = 0.0f;
             const float s2 = 2.0f * sigma * sigma;
             for (int i = -GR; i <= GR; ++i)
+            {
                 for (int j = -GR; j <= GR; ++j)
                 {
-                    const float v = std::exp(-(float)(i*i + j*j) / s2);
+                    const float v = std::exp(-(float)(i * i + j * j) / s2);
                     gKernel[i + GR][j + GR] = v;
                     sum += v;
                 }
+            }
+            // Normalizare: suma coeficientilor = 1.
             for (int i = 0; i < GK; ++i)
                 for (int j = 0; j < GK; ++j)
                     gKernel[i][j] /= sum;
         }
 
-        // 2D convolution with clamp-to-edge borders.
+        // Convolutie 2D cu clamp-to-edge pe margini (atClamp).
+        //   blurred(x, y) = sum_{i,j} gKernel[i,j] * gray[y+i, x+j]
+        // Pentru indici din afara imaginii, atClamp intoarce valoarea celui
+        // mai apropiat pixel valid, nu 0 -- astfel evitam intunecarea
+        // marginilor.
         Mat blurred(H, W, CV_32F);
         for (int y = 0; y < H; ++y)
         {
@@ -125,209 +156,155 @@ void testShiTomasi()
                 float acc = 0.0f;
                 for (int i = -GR; i <= GR; ++i)
                     for (int j = -GR; j <= GR; ++j)
-                        acc += gKernel[i + GR][j + GR] * atClamp(gray, y + i, x + j);
+                        acc += gKernel[i + GR][j + GR] *
+                               atClamp<float>(gray, y + i, x + j);
                 bRow[x] = acc;
             }
         }
-
-        // =====================================================================
-        // Step 3. Sobel gradients Ix, Iy via 3x3 kernels.
-        //         Sx = [[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]]
-        //         Sy = [[-1,-2,-1], [ 0, 0, 0], [ 1, 2, 1]]
-        //         Ix = I * Sx,  Iy = I * Sy   (discrete convolution)
-        // =====================================================================
-        const int Sx[3][3] = { {-1, 0, 1}, {-2, 0, 2}, {-1, 0, 1} };
-        const int Sy[3][3] = { {-1,-2,-1}, { 0, 0, 0}, { 1, 2, 1} };
-
-        Mat Ix(H, W, CV_32F);
-        Mat Iy(H, W, CV_32F);
-        for (int y = 0; y < H; ++y)
-        {
-            float* ixRow = Ix.ptr<float>(y);
-            float* iyRow = Iy.ptr<float>(y);
-            for (int x = 0; x < W; ++x)
-            {
-                float gx = 0.0f, gy = 0.0f;
-                for (int i = -1; i <= 1; ++i)
-                    for (int j = -1; j <= 1; ++j)
-                    {
-                        const float v = atClamp(blurred, y + i, x + j);
-                        gx += (float)Sx[i + 1][j + 1] * v;
-                        gy += (float)Sy[i + 1][j + 1] * v;
+        //etapa 3
+        //sobel kernels
+        Mat sobelFiltered = Mat::zeros(H, W, CV_32FC2);
+        float Gx[3][3] = { {-1, 0, 1},
+                            {-2, 0, 2},
+                            {-1, 0, 1} };
+        float Gy[3][3] = { {1, 2, 1},
+                            {0, 0, 0},
+                            {-1, -2, -1} };   
+        for(int i = 0; i < H; i++){
+            for(int j = 0; j < W; j++){
+                float sumX = 0.0f;
+                float sumY = 0.0f;
+                for(int k = -1; k <= 1; k++){
+                    for(int l = -1; l <= 1; l++){
+                        sumX += Gx[k + 1][l + 1] * atClamp<float>(blurred, i + k, j + l);
+                        sumY += Gy[k + 1][l + 1] * atClamp<float>(blurred, i + k, j + l);
                     }
-                ixRow[x] = gx;
-                iyRow[x] = gy;
+                }
+                //magnitudinea gradientului, stocare Ix si Iy in acelasi Mat pentru simplitate
+                sobelFiltered.at<Point2f>(i, j) = Point2f(sumX, sumY);
             }
         }
-
-        // =====================================================================
-        // Step 4. Structure matrix M = [[A, B], [B, C]] per pixel, with a 3x3
-        //         Gaussian-weighted window w:
-        //             A = sum  w * Ix^2
-        //             B = sum  w * Ix * Iy
-        //             C = sum  w * Iy^2
-        //         The small 3x3 Gaussian below is separable but we build it
-        //         directly; weights sum to 1.
-        // =====================================================================
-        const float w3[3][3] = {
-            { 1.0f / 16.0f, 2.0f / 16.0f, 1.0f / 16.0f },
-            { 2.0f / 16.0f, 4.0f / 16.0f, 2.0f / 16.0f },
-            { 1.0f / 16.0f, 2.0f / 16.0f, 1.0f / 16.0f }
-        };
-
-        Mat A(H, W, CV_32F);
-        Mat B(H, W, CV_32F);
-        Mat C(H, W, CV_32F);
-        for (int y = 0; y < H; ++y)
-        {
-            float* aRow = A.ptr<float>(y);
-            float* bRow = B.ptr<float>(y);
-            float* cRow = C.ptr<float>(y);
-            for (int x = 0; x < W; ++x)
-            {
-                float a = 0.0f, b = 0.0f, c = 0.0f;
-                for (int i = -1; i <= 1; ++i)
-                    for (int j = -1; j <= 1; ++j)
-                    {
-                        const float ix = atClamp(Ix, y + i, x + j);
-                        const float iy = atClamp(Iy, y + i, x + j);
-                        const float wt = w3[i + 1][j + 1];
-                        a += wt * ix * ix;
-                        b += wt * ix * iy;
-                        c += wt * iy * iy;
+        //etapa 4
+        //construire matrice de structura
+        Mat structureMatrix = Mat::zeros(H, W, CV_32FC3);
+        for(int i = 0; i < H; i++){
+            for(int j = 0; j < W; j++){
+                float Ix = sobelFiltered.at<Point2f>(i, j).x;
+                float Iy = sobelFiltered.at<Point2f>(i, j).y;
+                structureMatrix.at<Point3f>(i, j) = Point3f(Ix * Ix, Ix * Iy, Iy * Iy);
+            }
+        }
+        //etapa 5
+        //sumarea ponderata Gaussiana pe vecinatate pentru matricea de structura
+        Mat weightedStructure = Mat::zeros(H, W, CV_32FC3);
+        for(int i = 0; i < H; i++){
+            for(int j = 0; j < W; j++){
+                Point3f acc = Point3f(0.0f, 0.0f, 0.0f);
+                for(int k = -GR; k <= GR; k++){
+                    for(int l = -GR; l <= GR; l++){
+                        Point3f neighbor = atClamp<Point3f>(structureMatrix, i + k, j + l);
+                        float weight = gKernel[k + GR][l + GR];
+                        acc.x += weight * neighbor.x;
+                        acc.y += weight * neighbor.y;
+                        acc.z += weight * neighbor.z;
                     }
-                aRow[x] = a;
-                bRow[x] = b;
-                cRow[x] = c;
+                }
+                weightedStructure.at<Point3f>(i, j) = acc;
             }
         }
-
-        // =====================================================================
-        // Step 5 & 6. Eigenvalues of the symmetric 2x2 matrix [[A, B], [B, C]]
-        //         via the closed-form formula:
-        //             trace = A + C
-        //             det   = A*C - B*B
-        //             disc  = sqrt(max(0, (trace/2)^2 - det))
-        //             lambda1 = trace/2 + disc
-        //             lambda2 = trace/2 - disc
-        //         Shi-Tomasi response: R = min(lambda1, lambda2) = trace/2 - disc.
-        // =====================================================================
-        Mat R(H, W, CV_32F);
-        float maxR = 0.0f;
-        for (int y = 0; y < H; ++y)
-        {
-            const float* aRow = A.ptr<float>(y);
-            const float* bRow = B.ptr<float>(y);
-            const float* cRow = C.ptr<float>(y);
-            float*       rRow = R.ptr<float>(y);
-            for (int x = 0; x < W; ++x)
-            {
-                const float a = aRow[x], b = bRow[x], c = cRow[x];
-                const float halfTr = 0.5f * (a + c);
-                const float det    = a * c - b * b;
-                float       inside = halfTr * halfTr - det;
-                if (inside < 0.0f) inside = 0.0f;     // guard against FP noise
-                const float disc   = std::sqrt(inside);
-                const float lambdaMin = halfTr - disc;
-                rRow[x] = lambdaMin;
-                if (lambdaMin > maxR) maxR = lambdaMin;
+        
+        //etapa 6
+        //calcul valorii proprii prin formula inchisa
+        //  trace = A + C
+        //  det   = A*C - B*B
+        //  lambda1,2 = trace/2 +/- sqrt(trace^2/4 - det)
+        //  R(x, y)   = min(lambda1, lambda2) = trace/2 - sqrt(...)
+        //
+        // Protectie NaN: din cauza preciziei float, trace^2/4 - det poate
+        // ajunge usor negativ (teoretic e intotdeauna >= 0 pentru matrice
+        // simetrica). Aplicam max(0, ...) inainte de sqrt ca sa nu aparem
+        // cu NaN in response, care strica maxResponse si threshold-ul.
+        Mat response = Mat::zeros(H, W, CV_32F);
+        for(int i = 0; i < H; i++){
+            for(int j = 0; j < W; j++){
+                float A = weightedStructure.at<Point3f>(i, j).x;
+                float B = weightedStructure.at<Point3f>(i, j).y;
+                float C = weightedStructure.at<Point3f>(i, j).z;
+                float trace = A + C;
+                float det = A * C - B * B;
+                float inside = trace * trace / 4 - det;
+                if (inside < 0.0f) inside = 0.0f;
+                float disc = std::sqrt(inside);
+                float lambdaMin = trace / 2 - disc;
+                response.at<float>(i, j) = lambdaMin;
             }
         }
+        //etapa 7
+        //thresholding: keep pixels with response > QUALITY_LEVEL * maxResponse
+        const float QUALITY_LEVEL = 0.01f;
+        float maxResponse = 0.0f;
+        for(int i = 0; i < H; i++){
+            for(int j = 0; j < W; j++){
+                const float v = response.at<float>(i, j);
+                if(v > maxResponse) maxResponse = v;
+            }
+        }
+        const float threshold = QUALITY_LEVEL * maxResponse;
 
-        // =====================================================================
-        // Step 7. Thresholding: keep only pixels with R(x,y) > Q * maxR.
-        // =====================================================================
-        const float threshold = QUALITY_LEVEL * maxR;
-
-        // =====================================================================
-        // Step 8. Non-maximum suppression in a (2*MIN_DISTANCE+1) x ... window.
-        //         A pixel survives only if it is strictly greater than every
-        //         other pixel inside this window. Ties on the boundary are
-        //         broken by (y, x) lexicographic order to avoid duplicates.
-        // =====================================================================
-        std::vector<std::pair<float, Point>> corners;
-        corners.reserve(4096);
-        const int RAD = MIN_DISTANCE;
-
-        for (int y = 0; y < H; ++y)
-        {
-            const float* rRow = R.ptr<float>(y);
-            for (int x = 0; x < W; ++x)
-            {
-                const float v = rRow[x];
-                if (v <= threshold) continue;
+        //etapa 8
+        //non-maximum suppression pe fereastra (2*MIN_DISTANCE+1) x ...
+        // Pentru fiecare pixel p cu response > threshold, verificam daca p
+        // este maxim local in fereastra [y-D, y+D] x [x-D, x+D]. Asa evitam
+        // comparatia O(n^2) intre toate perechile de candidati.
+        const int MIN_DISTANCE = 10;
+        std::vector<std::pair<Point2f, float>> nmsCorners;
+        for(int i = 0; i < H; i++){
+            for(int j = 0; j < W; j++){
+                const float v = response.at<float>(i, j);
+                if(v <= threshold) continue;
 
                 bool isMax = true;
-                const int y0 = std::max(0, y - RAD);
-                const int y1 = std::min(H - 1, y + RAD);
-                const int x0 = std::max(0, x - RAD);
-                const int x1 = std::min(W - 1, x + RAD);
+                const int y0 = std::max(0, i - MIN_DISTANCE);
+                const int y1 = std::min(H - 1, i + MIN_DISTANCE);
+                const int x0 = std::max(0, j - MIN_DISTANCE);
+                const int x1 = std::min(W - 1, j + MIN_DISTANCE);
 
-                for (int yy = y0; yy <= y1 && isMax; ++yy)
-                {
-                    const float* nRow = R.ptr<float>(yy);
-                    for (int xx = x0; xx <= x1; ++xx)
-                    {
-                        if (yy == y && xx == x) continue;
-                        const float nv = nRow[xx];
-                        if (nv > v) { isMax = false; break; }
-                        // tie-break: equal neighbour earlier in scan order wins
-                        if (nv == v && (yy < y || (yy == y && xx < x)))
-                        {
-                            isMax = false;
-                            break;
+                for(int yy = y0; yy <= y1 && isMax; yy++){
+                    for(int xx = x0; xx <= x1; xx++){
+                        if(yy == i && xx == j) continue;
+                        const float nv = response.at<float>(yy, xx);
+                        if(nv > v){ isMax = false; break; }
+                        // tie-break: pentru valori egale, castiga primul in
+                        // ordinea de scanare (evita duplicate pe platouri).
+                        if(nv == v && (yy < i || (yy == i && xx < j))){
+                            isMax = false; break;
                         }
                     }
                 }
 
-                if (isMax) corners.emplace_back(v, Point(x, y));
+                if(isMax) nmsCorners.push_back(std::make_pair(Point2f((float)j, (float)i), v));
             }
         }
-
-        // =====================================================================
-        // Step 9. Sort by score descending, keep top MAX_CORNERS.
-        // =====================================================================
-        std::sort(corners.begin(), corners.end(),
-                  [](const std::pair<float, Point>& a,
-                     const std::pair<float, Point>& b) {
-                      return a.first > b.first;
-                  });
-        if ((int)corners.size() > MAX_CORNERS)
-            corners.resize(MAX_CORNERS);
-
-        printf("Shi-Tomasi: maxR = %.4f, threshold = %.4f, corners kept = %d\n",
-               maxR, threshold, (int)corners.size());
-
-        // =====================================================================
-        // Step 10. Draw red circles on a copy of the original image.
-        //          cv::circle is the only drawing primitive used.
-        // =====================================================================
+        //etapa 9
+        //sortare dupa scor si pastrare top MAX_CORNERS
+        const int MAX_CORNERS = 100;
+        std::sort(nmsCorners.begin(), nmsCorners.end(), [](const std::pair<Point2f, float>& a, const std::pair<Point2f, float>& b){
+            return a.second > b.second;
+        });
+        if(nmsCorners.size() > MAX_CORNERS){
+            nmsCorners.resize(MAX_CORNERS);
+        }
+        //etapa 10
+        //desenare cercuri rosii pe o copie a imaginii sursa si afisare
         Mat result = src.clone();
-        for (const auto& kp : corners)
-            circle(result, kp.second, 5, Scalar(0, 0, 255), 1, LINE_AA);
-
-        // =====================================================================
-        // Display and save as "<original>_corners.<ext>".
-        // =====================================================================
-        imshow("Shi-Tomasi Corners", result);
-
-        {
-            char outName[MAX_PATH];
-            const char* dot = strrchr(fname, '.');
-            if (dot != nullptr)
-            {
-                const int stemLen = (int)(dot - fname);
-                snprintf(outName, MAX_PATH, "%.*s_corners%s",
-                         stemLen, fname, dot);
-            }
-            else
-            {
-                snprintf(outName, MAX_PATH, "%s_corners.bmp", fname);
-            }
-            imwrite(outName, result);
-            printf("Saved: %s\n", outName);
+        for(size_t i = 0; i < nmsCorners.size(); i++){
+            cv::circle(result, nmsCorners[i].first, 5, cv::Scalar(0, 0, 255), 2);
         }
+        printf("Shi-Tomasi: maxR = %.4f, threshold = %.4f, colturi detectate = %d\n",
+               maxResponse, threshold, (int)nmsCorners.size());
 
+        imshow("Sursa", src);
+        imshow("Colt detectat", result);
         waitKey();
     }
 }
