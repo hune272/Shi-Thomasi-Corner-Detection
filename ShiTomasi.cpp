@@ -287,7 +287,7 @@ void testShiTomasi()
         }
         //etapa 9
         //sortare dupa scor si pastrare top MAX_CORNERS
-        const int MAX_CORNERS = 100;
+        const int MAX_CORNERS = 1000;
         std::sort(nmsCorners.begin(), nmsCorners.end(), [](const std::pair<Point2f, float>& a, const std::pair<Point2f, float>& b){
             return a.second > b.second;
         });
@@ -305,6 +305,28 @@ void testShiTomasi()
 
         imshow("Sursa", src);
         imshow("Colt detectat", result);
+
+        // Salvam rezultatul langa imaginea sursa, cu sufix "_corners".
+        // fname contine calea absoluta completa (ex: D:\...\building.jpg),
+        // deci concatenarea directa "ShiTomasi_result_" + fname ar fi
+        // invalida (`:` in mijloc). Injectam sufixul inainte de extensie,
+        // pastrand directorul original.
+        char outPath[MAX_PATH];
+        const char* dot = strrchr(fname, '.');
+        if (dot != nullptr)
+        {
+            const int stemLen = (int)(dot - fname);
+            snprintf(outPath, MAX_PATH, "%.*s_corners%s", stemLen, fname, dot);
+        }
+        else
+        {
+            snprintf(outPath, MAX_PATH, "%s_corners.bmp", fname);
+        }
+        if (imwrite(outPath, result))
+            printf("Saved: %s\n", outPath);
+        else
+            printf("imwrite FAILED for: %s\n", outPath);
+
         waitKey();
     }
 }
