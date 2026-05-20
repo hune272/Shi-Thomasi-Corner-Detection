@@ -224,7 +224,8 @@ void testShiTomasi()
         // ajunge usor negativ (teoretic e intotdeauna >= 0 pentru matrice
         // simetrica). Aplicam max(0, ...) inainte de sqrt ca sa nu aparem
         // cu NaN in response, care strica maxResponse si threshold-ul.
-        Mat response = Mat::zeros(H, W, CV_32F);
+        Mat response   = Mat::zeros(H, W, CV_32F);
+        Mat lambdaMaxM = Mat::zeros(H, W, CV_32F);  // completare etapa 6: stocarea lambdaMax pentru filtrul de izotropie
         for(int i = 0; i < H; i++){
             for(int j = 0; j < W; j++){
                 float A = weightedStructure.at<Point3f>(i, j).x;
@@ -236,12 +237,25 @@ void testShiTomasi()
                 if (inside < 0.0f) inside = 0.0f;
                 float disc = std::sqrt(inside);
                 float lambdaMin = trace / 2 - disc;
-                response.at<float>(i, j) = lambdaMin;
+                float lambdaMax = trace / 2 + disc;
+                response.at<float>(i, j)   = lambdaMin;
+                lambdaMaxM.at<float>(i, j) = lambdaMax;
             }
         }
         //etapa 7
-        //thresholding: keep pixels with response > QUALITY_LEVEL * maxResponse
-        const float QUALITY_LEVEL = 0.01f;
+        //thresholding: keep pixels with response > max(QUALITY_LEVEL * maxResponse, MIN_RESPONSE_ABS)
+        //
+        // Pragul relativ Q*maxR scaleaza automat pe imagini cu contraste
+        // diferite (corect dpdv. teoretic), DAR pe imagini fara colturi
+        // puternice (texturi: caramida, frunzis, asfalt) maxR este el insusi
+        // mic, deci pragul scade si lasa sa treaca zgomot.
+        //
+        // Adaugam un prag absolut minim ca "podea": pe imaginile bune
+        // (chessboard, fatade) maxR este mare si pragul relativ domina
+        // (comportament identic cu cel vechi); pe imaginile cu textura
+        // pragul absolut filtreaza detectiile spurioase.
+        const float QUALITY_LEVEL    = 0.01f;
+        const float MIN_RESPONSE_ABS = 1000.0f;   // podea anti-zgomot
         float maxResponse = 0.0f;
         for(int i = 0; i < H; i++){
             for(int j = 0; j < W; j++){
@@ -249,7 +263,8 @@ void testShiTomasi()
                 if(v > maxResponse) maxResponse = v;
             }
         }
-        const float threshold = QUALITY_LEVEL * maxResponse;
+        const float relativeThreshold = QUALITY_LEVEL * maxResponse;
+        const float threshold = std::max(relativeThreshold, MIN_RESPONSE_ABS);
 
         //etapa 8
         //non-maximum suppression pe fereastra (2*MIN_DISTANCE+1) x ...
@@ -262,6 +277,15 @@ void testShiTomasi()
             for(int j = 0; j < W; j++){
                 const float v = response.at<float>(i, j);
                 if(v <= threshold) continue;
+
+                // Filtru de izotropie: eliminarea punctelor de tip muchie.
+                // Pe un colt adevarat ambele valori proprii sunt semnificative (lambda1 ~ lambda2).
+                // Pe o muchie lambdaMax >> lambdaMin (gradientul e puternic doar intr-o directie).
+                // Daca raportul > MAX_EIGEN_RATIO, punctul e probabil muchie, nu colt
+                // (frunzis, arbusti, frontiera de textura).
+                const float MAX_EIGEN_RATIO = 4.0f;
+                const float lMax = lambdaMaxM.at<float>(i, j);
+                if(lMax > MAX_EIGEN_RATIO * v) continue;
 
                 bool isMax = true;
                 const int y0 = std::max(0, i - MIN_DISTANCE);
@@ -282,12 +306,44 @@ void testShiTomasi()
                     }
                 }
 
-                if(isMax) nmsCorners.push_back(std::make_pair(Point2f((float)j, (float)i), v));
+                if(isMax){
+                    // Rafinare sub-pixel prin fitting parabolic 2D pe response.
+                    // Formula clasica Forstner/Brown: aproximam local R(x, y)
+                    // cu o parabola separabila si gasim varful analitic.
+                    //   delta_x = (R(i, j-1) - R(i, j+1)) / (2*(R(i, j-1) - 2*R(i,j) + R(i, j+1)))
+                    //   delta_y = (R(i-1, j) - R(i+1, j)) / (2*(R(i-1, j) - 2*R(i,j) + R(i+1, j)))
+                    // Limitam |delta| < 0.5: daca varful parabolei ar cadea
+                    // in afara celulei curente, ramanem la coordonata intreaga
+                    // (formula nu se aplica bine in cazuri degenerate).
+                    float dx = 0.0f, dy = 0.0f;
+                    if(j > 0 && j < W - 1){
+                        const float rL = response.at<float>(i, j - 1);
+                        const float rR = response.at<float>(i, j + 1);
+                        const float denomX = rL - 2.0f * v + rR;
+                        if(std::abs(denomX) > 1e-6f){
+                            dx = (rL - rR) / (2.0f * denomX);
+                            if(dx >  0.5f) dx =  0.5f;
+                            if(dx < -0.5f) dx = -0.5f;
+                        }
+                    }
+                    if(i > 0 && i < H - 1){
+                        const float rU = response.at<float>(i - 1, j);
+                        const float rD = response.at<float>(i + 1, j);
+                        const float denomY = rU - 2.0f * v + rD;
+                        if(std::abs(denomY) > 1e-6f){
+                            dy = (rU - rD) / (2.0f * denomY);
+                            if(dy >  0.5f) dy =  0.5f;
+                            if(dy < -0.5f) dy = -0.5f;
+                        }
+                    }
+                    nmsCorners.push_back(std::make_pair(
+                        Point2f((float)j + dx, (float)i + dy), v));
+                }
             }
         }
         //etapa 9
         //sortare dupa scor si pastrare top MAX_CORNERS
-        const int MAX_CORNERS = 1000;
+        const int MAX_CORNERS = 50;
         std::sort(nmsCorners.begin(), nmsCorners.end(), [](const std::pair<Point2f, float>& a, const std::pair<Point2f, float>& b){
             return a.second > b.second;
         });
@@ -322,10 +378,10 @@ void testShiTomasi()
         {
             snprintf(outPath, MAX_PATH, "%s_corners.bmp", fname);
         }
-        if (imwrite(outPath, result))
-            printf("Saved: %s\n", outPath);
-        else
-            printf("imwrite FAILED for: %s\n", outPath);
+        // if (imwrite(outPath, result))
+        //     printf("Saved: %s\n", outPath);
+        // else
+        //     printf("imwrite FAILED for: %s\n", outPath);
 
         waitKey();
     }
