@@ -271,7 +271,7 @@ void testShiTomasi()
         // Pentru fiecare pixel p cu response > threshold, verificam daca p
         // este maxim local in fereastra [y-D, y+D] x [x-D, x+D]. Asa evitam
         // comparatia O(n^2) intre toate perechile de candidati.
-        const int MIN_DISTANCE = 10;
+        const int MIN_DISTANCE = 30;
         std::vector<std::pair<Point2f, float>> nmsCorners;
         for(int i = 0; i < H; i++){
             for(int j = 0; j < W; j++){
@@ -283,7 +283,7 @@ void testShiTomasi()
                 // Pe o muchie lambdaMax >> lambdaMin (gradientul e puternic doar intr-o directie).
                 // Daca raportul > MAX_EIGEN_RATIO, punctul e probabil muchie, nu colt
                 // (frunzis, arbusti, frontiera de textura).
-                const float MAX_EIGEN_RATIO = 4.0f;
+                const float MAX_EIGEN_RATIO = 5.0f;
                 const float lMax = lambdaMaxM.at<float>(i, j);
                 if(lMax > MAX_EIGEN_RATIO * v) continue;
 
@@ -343,7 +343,7 @@ void testShiTomasi()
         }
         //etapa 9
         //sortare dupa scor si pastrare top MAX_CORNERS
-        const int MAX_CORNERS = 50;
+        const int MAX_CORNERS = 100;
         std::sort(nmsCorners.begin(), nmsCorners.end(), [](const std::pair<Point2f, float>& a, const std::pair<Point2f, float>& b){
             return a.second > b.second;
         });
@@ -359,8 +359,19 @@ void testShiTomasi()
         printf("Shi-Tomasi: maxR = %.4f, threshold = %.4f, colturi detectate = %d\n",
                maxResponse, threshold, (int)nmsCorners.size());
 
-        imshow("Sursa", src);
-        imshow("Colt detectat", result);
+        // Scalare pentru afisare: daca imaginea depaseste MAX_DISPLAY_DIM,
+        // o micsoram proportional doar pentru imshow (src si result raman neatinse).
+        const int MAX_DISPLAY_DIM = 1280;
+        Mat srcDisp  = src;
+        Mat resDisp  = result;
+        const int maxDim = std::max(W, H);
+        if(maxDim > MAX_DISPLAY_DIM){
+            const double scale = (double)MAX_DISPLAY_DIM / maxDim;
+            cv::resize(src,    srcDisp, cv::Size(), scale, scale, cv::INTER_AREA);
+            cv::resize(result, resDisp, cv::Size(), scale, scale, cv::INTER_AREA);
+        }
+        imshow("Sursa", srcDisp);
+        imshow("Colt detectat", resDisp);
 
         // Salvam rezultatul langa imaginea sursa, cu sufix "_corners".
         // fname contine calea absoluta completa (ex: D:\...\building.jpg),
@@ -378,10 +389,10 @@ void testShiTomasi()
         {
             snprintf(outPath, MAX_PATH, "%s_corners.bmp", fname);
         }
-        // if (imwrite(outPath, result))
-        //     printf("Saved: %s\n", outPath);
-        // else
-        //     printf("imwrite FAILED for: %s\n", outPath);
+        if (imwrite(outPath, result))
+            printf("Saved: %s\n", outPath);
+        else
+            printf("imwrite FAILED for: %s\n", outPath);
 
         waitKey();
     }
