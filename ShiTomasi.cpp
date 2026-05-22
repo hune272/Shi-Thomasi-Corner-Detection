@@ -1,18 +1,3 @@
-// ShiTomasi.cpp
-// -----------------------------------------------------------------------------
-// Shi-Tomasi corner detector ("Good Features to Track", Shi & Tomasi, 1994)
-// implemented from scratch, following the lab framework pattern.
-//
-// OpenCV is used ONLY for:
-//   - image I/O and display (imread, imshow, imwrite, waitKey)
-//   - drawing the detected corners (cv::circle)
-//   - the Mat container as a float buffer (CV_32F)
-//
-// All image processing steps (grayscale conversion, Gaussian blur, Sobel
-// gradients, structure matrix, eigenvalues, response, thresholding, non-maximum
-// suppression) are hand-written.
-// -----------------------------------------------------------------------------
-
 #include "stdafx.h"
 #include "common.h"
 #include <opencv2/core/utils/logger.hpp>
@@ -25,8 +10,6 @@
 #include <cstdlib>
 #include <direct.h>
 
-// windows.h (pulled in via common.h) defines min/max as macros, which collide
-// with std::min / std::max. Remove them so the STL versions are usable below.
 #ifdef min
 #undef min
 #endif
@@ -122,7 +105,7 @@ void testShiTomasi()
         const int   GK = 5;        // dimensiunea kernelului
         const int   GR = GK / 2;   // raza kernelului (= 2)
         const float sigma = 1.0f;
-
+        //construire kernel gaussian 5x5 cu ponderi
         float gKernel[GK][GK];
         {
             float sum = 0.0f;
@@ -149,7 +132,8 @@ void testShiTomasi()
         // marginilor.
         Mat blurred(H, W, CV_32F);
         for (int y = 0; y < H; ++y)
-        {
+        {   
+            //retinem pointerul la linia curenta din imaginea blurata pentru acces rapid
             float* bRow = blurred.ptr<float>(y);
             for (int x = 0; x < W; ++x)
             {
@@ -164,9 +148,11 @@ void testShiTomasi()
         //etapa 3
         //sobel kernels
         Mat sobelFiltered = Mat::zeros(H, W, CV_32FC2);
+        //pe axa x, Gx = [-1 0 1; -2 0 2; -1 0 1]
         float Gx[3][3] = { {-1, 0, 1},
                             {-2, 0, 2},
                             {-1, 0, 1} };
+        //pe axa y, Gy = [1 2 1; 0 0 0; -1 -2 -1]
         float Gy[3][3] = { {1, 2, 1},
                             {0, 0, 0},
                             {-1, -2, -1} };   
@@ -176,6 +162,7 @@ void testShiTomasi()
                 float sumY = 0.0f;
                 for(int k = -1; k <= 1; k++){
                     for(int l = -1; l <= 1; l++){
+                        //sobel + gaussian in acelasi pas, pentru eficienta: aplicam direct Gx/Gy pe imaginea blurata
                         sumX += Gx[k + 1][l + 1] * atClamp<float>(blurred, i + k, j + l);
                         sumY += Gy[k + 1][l + 1] * atClamp<float>(blurred, i + k, j + l);
                     }
@@ -191,6 +178,7 @@ void testShiTomasi()
             for(int j = 0; j < W; j++){
                 float Ix = sobelFiltered.at<Point2f>(i, j).x;
                 float Iy = sobelFiltered.at<Point2f>(i, j).y;
+                //arata cum se schimba intensitatea in jurul pixelului curent: A = Ix^2, B = Ix*Iy, C = Iy^2
                 structureMatrix.at<Point3f>(i, j) = Point3f(Ix * Ix, Ix * Iy, Iy * Iy);
             }
         }
@@ -237,6 +225,7 @@ void testShiTomasi()
                 if (inside < 0.0f) inside = 0.0f;
                 float disc = std::sqrt(inside);
                 float lambdaMin = trace / 2 - disc;
+                //pt filtru de izotropie: pastram si lambdaMax pentru comparatie in etapa 8
                 float lambdaMax = trace / 2 + disc;
                 response.at<float>(i, j)   = lambdaMin;
                 lambdaMaxM.at<float>(i, j) = lambdaMax;
@@ -350,6 +339,17 @@ void testShiTomasi()
         if(nmsCorners.size() > MAX_CORNERS){
             nmsCorners.resize(MAX_CORNERS);
         }
+        // FAST corner detection pe aceeasi imagine, folosind implementarea OpenCV.
+        // Imaginea grayscale trebuie sa fie CV_8U pentru cv::FAST.
+        Mat gray8u;
+        gray.convertTo(gray8u, CV_8U);
+        std::vector<cv::KeyPoint> fastKeypoints;
+        cv::FAST(gray8u, fastKeypoints, /*threshold=*/75, /*nonmaxSuppression=*/true);
+        Mat resultFast = src.clone();
+        for(const auto& kp : fastKeypoints)
+            cv::circle(resultFast, kp.pt, 5, cv::Scalar(0, 255, 0), 2);
+        printf("FAST: colturi detectate = %d\n", (int)fastKeypoints.size());
+
         //etapa 10
         //desenare cercuri rosii pe o copie a imaginii sursa si afisare
         Mat result = src.clone();
@@ -364,14 +364,17 @@ void testShiTomasi()
         const int MAX_DISPLAY_DIM = 1280;
         Mat srcDisp  = src;
         Mat resDisp  = result;
+        Mat fastDisp = resultFast;
         const int maxDim = std::max(W, H);
         if(maxDim > MAX_DISPLAY_DIM){
             const double scale = (double)MAX_DISPLAY_DIM / maxDim;
-            cv::resize(src,    srcDisp, cv::Size(), scale, scale, cv::INTER_AREA);
-            cv::resize(result, resDisp, cv::Size(), scale, scale, cv::INTER_AREA);
+            cv::resize(src,        srcDisp,  cv::Size(), scale, scale, cv::INTER_AREA);
+            cv::resize(result,     resDisp,  cv::Size(), scale, scale, cv::INTER_AREA);
+            cv::resize(resultFast, fastDisp, cv::Size(), scale, scale, cv::INTER_AREA);
         }
+        imshow("FAST", fastDisp);
         imshow("Sursa", srcDisp);
-        imshow("Colt detectat", resDisp);
+        imshow("Colt detectat (Shi-Tomasi)", resDisp);
 
         // Salvam rezultatul langa imaginea sursa, cu sufix "_corners".
         // fname contine calea absoluta completa (ex: D:\...\building.jpg),
@@ -393,6 +396,21 @@ void testShiTomasi()
             printf("Saved: %s\n", outPath);
         else
             printf("imwrite FAILED for: %s\n", outPath);
+
+        char outPathFast[MAX_PATH];
+        if (dot != nullptr)
+        {
+            const int stemLen = (int)(dot - fname);
+            snprintf(outPathFast, MAX_PATH, "%.*s_corners_fast%s", stemLen, fname, dot);
+        }
+        else
+        {
+            snprintf(outPathFast, MAX_PATH, "%s_corners_fast.bmp", fname);
+        }
+        if (imwrite(outPathFast, resultFast))
+            printf("Saved: %s\n", outPathFast);
+        else
+            printf("imwrite FAILED for: %s\n", outPathFast);
 
         waitKey();
     }
